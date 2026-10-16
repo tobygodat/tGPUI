@@ -351,6 +351,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "std", feature = "alloc"))]
     fn evicted_measurement_answers_only_its_own_inputs() {
         let mut cache = Cache::new();
         let first = measure_input(100.0, Size { width: 100.0, height: 100.0 }, RequestedAxis::Both);
