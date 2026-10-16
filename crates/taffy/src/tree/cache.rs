@@ -10,6 +10,15 @@ use crate::RequestedAxis;
 /// The number of cache entries for each node in the tree
 const CACHE_SIZE: usize = 9;
 
+/// The most measurements kept for one node beyond its `CACHE_SIZE` slots.
+///
+/// A node inside nested flex containers is measured under one set of inputs per pass of each
+/// ancestor, and those inputs share a slot, so they would evict each other. Each eviction then
+/// re-measures the whole subtree, and the cost grows exponentially with depth. Keeping evicted
+/// measurements lets each distinct input be computed once. Nested lists ten levels deep need
+/// about forty entries per node.
+const OVERFLOW_SIZE: usize = 64;
+
 // Manually written-out results of float to u32 bit casts because
 // `f32::to_bits` is not yet const at our MSRV.
 
@@ -104,6 +113,11 @@ impl CacheKey {
     fn x_axis_parent_size(&self) -> u64 {
         self.parent_size & (X_AXIS_VALUE_MASK & NON_SIGN_BITS_MASK)
     }
+
+    /// Whether a measurement stored under this key answers a measurement requested with `other`
+    fn measures_same_as(&self, other: &CacheKey) -> bool {
+        self.kd_available_space == other.kd_available_space && self.x_axis_parent_size() == other.x_axis_parent_size()
+    }
 }
 
 impl From<&LayoutInput> for CacheKey {
@@ -140,6 +154,8 @@ pub struct Cache {
     final_layout_entry: Option<CacheEntry<LayoutOutput>>,
     /// The cache entries for the node's preliminary size measurements
     measure_entries: [Option<CacheEntry<Size<f32>>>; CACHE_SIZE],
+    /// Measurements evicted from `measure_entries` by a different input in the same slot
+    evicted_measure_entries: Vec<CacheEntry<Size<f32>>>,
     /// Tracks if all cache entries are empty
     is_empty: bool,
 }
@@ -153,7 +169,12 @@ impl Default for Cache {
 impl Cache {
     /// Create a new empty cache
     pub const fn new() -> Self {
-        Self { final_layout_entry: None, measure_entries: [None; CACHE_SIZE], is_empty: true }
+        Self {
+            final_layout_entry: None,
+            measure_entries: [None; CACHE_SIZE],
+            evicted_measure_entries: Vec::new(),
+            is_empty: true,
+        }
     }
 
     /// Return the cache slot to cache the current computed result in
@@ -226,17 +247,13 @@ impl Cache {
         let key = CacheKey::from(input);
         match input.run_mode {
             RunMode::PerformLayout => self.final_layout_entry.filter(|entry| entry.key == key).map(|e| e.content),
-            RunMode::ComputeSize => {
-                for entry in self.measure_entries.iter().flatten() {
-                    if entry.key.kd_available_space == key.kd_available_space
-                        && (entry.key.x_axis_parent_size() == key.x_axis_parent_size())
-                    {
-                        return Some(LayoutOutput::from_outer_size(entry.content));
-                    }
-                }
-
-                None
-            }
+            RunMode::ComputeSize => self
+                .measure_entries
+                .iter()
+                .flatten()
+                .chain(self.evicted_measure_entries.iter())
+                .find(|entry| entry.key.measures_same_as(&key))
+                .map(|entry| LayoutOutput::from_outer_size(entry.content)),
             RunMode::PerformHiddenLayout => None,
         }
     }
@@ -252,6 +269,12 @@ impl Cache {
             RunMode::ComputeSize => {
                 self.is_empty = false;
                 let cache_slot = Self::compute_cache_slot(input.known_dimensions, input.available_space);
+                if let Some(evicted) = self.measure_entries[cache_slot].filter(|entry| !entry.key.measures_same_as(&key)) {
+                    if self.evicted_measure_entries.len() == OVERFLOW_SIZE {
+                        self.evicted_measure_entries.remove(0);
+                    }
+                    self.evicted_measure_entries.push(evicted);
+                }
                 self.measure_entries[cache_slot] = Some(CacheEntry { key, content: layout_output.size });
             }
             RunMode::PerformHiddenLayout => {}
@@ -266,12 +289,15 @@ impl Cache {
         self.is_empty = true;
         self.final_layout_entry = None;
         self.measure_entries = [None; CACHE_SIZE];
+        self.evicted_measure_entries.clear();
         ClearState::Cleared
     }
 
     /// Returns true if all cache entries are None, else false
     pub fn is_empty(&self) -> bool {
-        self.final_layout_entry.is_none() && !self.measure_entries.iter().any(|entry| entry.is_some())
+        self.final_layout_entry.is_none()
+            && !self.measure_entries.iter().any(|entry| entry.is_some())
+            && self.evicted_measure_entries.is_empty()
     }
 }
 
