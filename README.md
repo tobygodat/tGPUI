@@ -18,7 +18,7 @@ carries, so `git log` lists the patches and `git diff <import commit>` shows the
   instead of panicking. Keystone KS-009, upstream zed-industries/zed#64660.
 - `taffy`: measurements evicted from the nine per-node cache slots are kept in an overflow list.
   Without it, nested flex layout re-measures subtrees on every pass and grows about fourfold per
-  nesting level.
+  nesting level. An evicted measurement answers only a request with identical inputs.
 
 ## Using it
 
@@ -39,4 +39,6 @@ cherry-pick the patch commits onto it. Drop any patch that upstream has taken.
 
 ## License
 
-Apache-2.0, as upstream. Each crate keeps its own `LICENSE-APACHE`. See `LICENSE`.
+The GPUI crates are Apache-2.0, as upstream. Each keeps its own `LICENSE-APACHE`. See `LICENSE`.
+
+`crates/taffy` is MIT, as upstream taffy. See `crates/taffy/LICENSE`.
