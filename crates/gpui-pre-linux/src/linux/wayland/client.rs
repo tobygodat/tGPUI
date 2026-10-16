@@ -2121,7 +2121,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
             } => {
                 let focused_window = state.keyboard_focused_window.clone();
 
-                let keymap_state = state.keymap_state.as_mut().unwrap();
+                // A seat whose active keyboard went away still sends enter and
+                // modifiers events, but no keymap. Without a keymap the
+                // modifiers cannot be decoded, so the event is dropped.
+                let Some(keymap_state) = state.keymap_state.as_mut() else {
+                    log::warn!("wayland: modifiers event before any keymap; ignoring");
+                    return;
+                };
                 let old_layout =
                     keymap_state.serialize_layout(xkbcommon::xkb::STATE_LAYOUT_EFFECTIVE);
                 keymap_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
@@ -2158,7 +2164,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     return;
                 };
 
-                let keymap_state = state.keymap_state.as_ref().unwrap();
+                let Some(keymap_state) = state.keymap_state.as_ref() else {
+                    log::warn!("wayland: key event before any keymap; ignoring");
+                    return;
+                };
                 let keycode = Keycode::from(key + MIN_KEYCODE);
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
