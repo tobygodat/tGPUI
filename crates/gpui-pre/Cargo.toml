@@ -512,7 +512,7 @@ path = "../gpui-pre-sum-tree"
 package = "gpui-pre-sum-tree"
 
 [dependencies.taffy]
-version = "0.13.0"
+path = "../taffy"
 features = [
     "std",
     "taffy_tree",
