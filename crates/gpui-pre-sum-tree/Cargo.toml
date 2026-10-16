@@ -58,7 +58,7 @@ version = "1.8"
 version = "0.1.40"
 
 [dependencies.ztracing]
-version = "=0.3.9"
+path = "../gpui-pre-ztracing"
 package = "gpui-pre-ztracing"
 
 [lints.clippy]

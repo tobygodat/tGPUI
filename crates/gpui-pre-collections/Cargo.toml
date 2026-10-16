@@ -40,7 +40,7 @@ path = "src/collections.rs"
 doctest = false
 
 [dependencies.gpui_util]
-version = "=0.3.9"
+path = "../gpui-pre-util"
 package = "gpui-pre-util"
 
 [dependencies.indexmap]

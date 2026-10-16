@@ -40,7 +40,7 @@ test = false
 doctest = false
 
 [dependencies.derive_refineable]
-version = "=0.3.9"
+path = "../gpui-pre-derive-refineable"
 package = "gpui-pre-derive-refineable"
 
 [lints.clippy]

@@ -78,12 +78,12 @@ required-features = ["bench-support"]
 version = "1.0.86"
 
 [dependencies.gpui]
-version = "=0.3.9"
+path = "../gpui-pre"
 default-features = false
 package = "gpui-pre"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui_linux]
-version = "=0.3.9"
+path = "../gpui-pre-linux"
 default-features = false
 package = "gpui-pre-linux"
 
@@ -91,28 +91,28 @@ package = "gpui-pre-linux"
 version = "0.1.7"
 
 [target.'cfg(target_family = "wasm")'.dependencies.gpui_web]
-version = "=0.3.9"
+path = "../gpui-pre-web"
 default-features = false
 package = "gpui-pre-web"
 
 [target.'cfg(target_os = "linux")'.dependencies.gpui_wgpu]
-version = "=0.3.9"
+path = "../gpui-pre-wgpu"
 optional = true
 package = "gpui-pre-wgpu"
 
 [target.'cfg(target_os = "macos")'.dependencies.gpui_macos]
-version = "=0.3.9"
+path = "../gpui-pre-macos"
 default-features = false
 package = "gpui-pre-macos"
 
 [target.'cfg(target_os = "windows")'.dependencies.gpui]
-version = "=0.3.9"
+path = "../gpui-pre"
 features = ["windows-manifest"]
 default-features = false
 package = "gpui-pre"
 
 [target.'cfg(target_os = "windows")'.dependencies.gpui_windows]
-version = "=0.3.9"
+path = "../gpui-pre-windows"
 default-features = false
 package = "gpui-pre-windows"
 

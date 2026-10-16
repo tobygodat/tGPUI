@@ -68,7 +68,7 @@ optional = true
 package = "gpui-pre-zlog"
 
 [dependencies.ztracing_macro]
-version = "=0.3.9"
+path = "../gpui-pre-ztracing-macro"
 package = "gpui-pre-ztracing-macro"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.tracing-tracy]

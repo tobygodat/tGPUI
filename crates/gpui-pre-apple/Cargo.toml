@@ -49,7 +49,7 @@ path = "src/gpui_apple.rs"
 doctest = false
 
 [dependencies.gpui]
-version = "=0.3.9"
+path = "../gpui-pre"
 default-features = false
 package = "gpui-pre"
 
@@ -63,7 +63,7 @@ version = "4.7"
 version = "0.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.collections]
-version = "=0.3.9"
+path = "../gpui-pre-collections"
 package = "gpui-pre-collections"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.core-foundation]
@@ -109,7 +109,7 @@ version = "0.5"
 version = "0.3.34"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.gpui_util]
-version = "=0.3.9"
+path = "../gpui-pre-util"
 package = "gpui-pre-util"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.image]
