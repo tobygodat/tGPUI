@@ -154,7 +154,9 @@ pub struct Cache {
     final_layout_entry: Option<CacheEntry<LayoutOutput>>,
     /// The cache entries for the node's preliminary size measurements
     measure_entries: [Option<CacheEntry<Size<f32>>>; CACHE_SIZE],
-    /// Measurements evicted from `measure_entries` by a different input in the same slot
+    /// Measurements evicted from `measure_entries` by a different input in the same slot. Unlike the
+    /// slots, an evicted measurement answers only a request with its exact inputs, because the slots'
+    /// match ignores the parent height and the requested axis.
     evicted_measure_entries: Vec<CacheEntry<Size<f32>>>,
     /// Tracks if all cache entries are empty
     is_empty: bool,
@@ -251,8 +253,8 @@ impl Cache {
                 .measure_entries
                 .iter()
                 .flatten()
-                .chain(self.evicted_measure_entries.iter())
                 .find(|entry| entry.key.measures_same_as(&key))
+                .or_else(|| self.evicted_measure_entries.iter().find(|entry| entry.key == key))
                 .map(|entry| LayoutOutput::from_outer_size(entry.content)),
             RunMode::PerformHiddenLayout => None,
         }
@@ -269,7 +271,7 @@ impl Cache {
             RunMode::ComputeSize => {
                 self.is_empty = false;
                 let cache_slot = Self::compute_cache_slot(input.known_dimensions, input.available_space);
-                if let Some(evicted) = self.measure_entries[cache_slot].filter(|entry| !entry.key.measures_same_as(&key)) {
+                if let Some(evicted) = self.measure_entries[cache_slot].filter(|entry| entry.key != key) {
                     if self.evicted_measure_entries.len() == OVERFLOW_SIZE {
                         self.evicted_measure_entries.remove(0);
                     }
@@ -307,4 +309,48 @@ pub enum ClearState {
     Cleared,
     /// Everything was already cleared
     AlreadyEmpty,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cache;
+    use crate::geometry::{Line, Size};
+    use crate::style::AvailableSpace;
+    use crate::tree::{LayoutInput, LayoutOutput, RequestedAxis, RunMode, SizingMode};
+
+    fn measure_input(width: f32, parent_size: Size<f32>, axis: RequestedAxis) -> LayoutInput {
+        LayoutInput {
+            run_mode: RunMode::ComputeSize,
+            sizing_mode: SizingMode::InherentSize,
+            axis,
+            known_dimensions: Size { width: Some(width), height: None },
+            parent_size: Size { width: Some(parent_size.width), height: Some(parent_size.height) },
+            available_space: Size { width: AvailableSpace::Definite(width), height: AvailableSpace::MaxContent },
+            vertical_margins_are_collapsible: Line::FALSE,
+        }
+    }
+
+    fn measured_height(cache: &Cache, input: &LayoutInput) -> Option<f32> {
+        cache.get(input).map(|output| output.size.height)
+    }
+
+    #[test]
+    fn evicted_measurement_answers_only_its_own_inputs() {
+        let mut cache = Cache::new();
+        let first = measure_input(100.0, Size { width: 100.0, height: 100.0 }, RequestedAxis::Both);
+        cache.store(&first, LayoutOutput::from_outer_size(Size { width: 100.0, height: 50.0 }));
+        let evicting = measure_input(200.0, Size { width: 200.0, height: 100.0 }, RequestedAxis::Both);
+        cache.store(&evicting, LayoutOutput::from_outer_size(Size { width: 200.0, height: 50.0 }));
+
+        assert_eq!(measured_height(&cache, &first), Some(50.0), "evicted measurement is kept");
+
+        let taller_parent = measure_input(100.0, Size { width: 100.0, height: 200.0 }, RequestedAxis::Both);
+        assert_eq!(measured_height(&cache, &taller_parent), None, "a percentage height needs the parent height");
+
+        let horizontal = measure_input(100.0, Size { width: 100.0, height: 100.0 }, RequestedAxis::Horizontal);
+        let mut horizontal_cache = Cache::new();
+        horizontal_cache.store(&horizontal, LayoutOutput::from_outer_size(Size { width: 100.0, height: 0.0 }));
+        horizontal_cache.store(&evicting, LayoutOutput::from_outer_size(Size { width: 200.0, height: 50.0 }));
+        assert_eq!(measured_height(&horizontal_cache, &first), None, "a width-only result has no height to reuse");
+    }
 }
