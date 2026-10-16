@@ -136,6 +136,21 @@ impl From<&LayoutInput> for CacheKey {
     }
 }
 
+/// Measurements evicted from a node's slots. Keeping them needs an allocator, so without one the
+/// list stays empty and evicted measurements are dropped, as upstream taffy does.
+#[cfg(any(feature = "std", feature = "alloc"))]
+type EvictedEntries = crate::util::sys::Vec<CacheEntry<Size<f32>>>;
+/// Without an allocator no evicted measurement is kept
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+type EvictedEntries = arrayvec::ArrayVec<CacheEntry<Size<f32>>, 0>;
+
+/// An empty `EvictedEntries`, usable in a `const fn`
+#[cfg(any(feature = "std", feature = "alloc"))]
+const NO_EVICTED_ENTRIES: EvictedEntries = EvictedEntries::new();
+/// An empty `EvictedEntries`, usable in a `const fn`
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+const NO_EVICTED_ENTRIES: EvictedEntries = EvictedEntries::new_const();
+
 /// Cached intermediate layout results
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
@@ -157,7 +172,7 @@ pub struct Cache {
     /// Measurements evicted from `measure_entries` by a different input in the same slot. Unlike the
     /// slots, an evicted measurement answers only a request with its exact inputs, because the slots'
     /// match ignores the parent height and the requested axis.
-    evicted_measure_entries: Vec<CacheEntry<Size<f32>>>,
+    evicted_measure_entries: EvictedEntries,
     /// Tracks if all cache entries are empty
     is_empty: bool,
 }
@@ -174,7 +189,7 @@ impl Cache {
         Self {
             final_layout_entry: None,
             measure_entries: [None; CACHE_SIZE],
-            evicted_measure_entries: Vec::new(),
+            evicted_measure_entries: NO_EVICTED_ENTRIES,
             is_empty: true,
         }
     }
@@ -271,6 +286,7 @@ impl Cache {
             RunMode::ComputeSize => {
                 self.is_empty = false;
                 let cache_slot = Self::compute_cache_slot(input.known_dimensions, input.available_space);
+                #[cfg(any(feature = "std", feature = "alloc"))]
                 if let Some(evicted) = self.measure_entries[cache_slot].filter(|entry| entry.key != key) {
                     if self.evicted_measure_entries.len() == OVERFLOW_SIZE {
                         self.evicted_measure_entries.remove(0);
