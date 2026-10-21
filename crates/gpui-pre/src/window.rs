@@ -1217,6 +1217,8 @@ pub struct Window {
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
+    /// An app drag was handed to the platform since the last frame, which paints its icon.
+    drag_icon_requested: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     pub(crate) display_id: Option<DisplayId>,
     pub(crate) display_observers: SubscriberSet<(), AnyObserver>,
@@ -2125,6 +2127,7 @@ impl Window {
             handle,
             invalidator,
             removed: false,
+            drag_icon_requested: false,
             platform_window,
             display_id,
             display_observers: SubscriberSet::new(),
@@ -3714,6 +3717,16 @@ impl Window {
 
         self.prepaint_deferred_draws(cx);
 
+        let drag_icon = std::mem::take(&mut self.drag_icon_requested)
+            .then(|| cx.platform_drag_view(self.handle.window_id()))
+            .flatten()
+            .map(|(view, cursor_offset)| {
+                let mut element = view.into_any_element();
+                let size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
+                element.prepaint_at(Point::default(), self, cx);
+                (element, size, cursor_offset)
+            });
+
         let mut prompt_element = None;
         let mut active_drag_element = None;
         let mut tooltip_element = None;
@@ -3756,6 +3769,18 @@ impl Window {
             drag_element.paint(self, cx);
         } else if let Some(mut tooltip_element) = tooltip_element {
             tooltip_element.paint(self, cx);
+        }
+
+        if let Some((mut element, size, cursor_offset)) = drag_icon {
+            let frame_scene = std::mem::take(&mut self.next_frame.scene);
+            element.paint(self, cx);
+            let mut icon = std::mem::replace(&mut self.next_frame.scene, frame_scene);
+            icon.finish();
+            let size = size
+                .scale(scale_factor)
+                .map(|d| DevicePixels(d.0.ceil() as i32));
+            self.platform_window
+                .set_external_drag_icon(&icon, size, cursor_offset);
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -5659,7 +5684,7 @@ impl Window {
                 FileDropEvent::Entered { position, paths } => {
                     self.mouse_position = position;
                     let source_window = self.handle.window_id();
-                    if !cx.restore_platform_drag(source_window) && cx.active_drag.is_none() {
+                    if !cx.restore_platform_drag(source_window, false) && cx.active_drag.is_none() {
                         cx.active_drag = Some(AnyDrag {
                             value: Arc::new(paths.clone()),
                             view: cx.new(|_| paths).into(),
@@ -5703,6 +5728,26 @@ impl Window {
                     cx.end_platform_drag(self.handle.window_id());
                     self.refresh();
                     PlatformInput::FileDrop(FileDropEvent::Ended)
+                }
+                FileDropEvent::AppDragEntered { position } => {
+                    self.mouse_position = position;
+                    cx.restore_platform_drag(self.handle.window_id(), true);
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    })
+                }
+                FileDropEvent::AppDragDroppedOutside => {
+                    cx.restore_platform_drag(self.handle.window_id(), false);
+                    let position = point(px(-1.), px(-1.));
+                    self.mouse_position = position;
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                    })
                 }
             },
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
@@ -5786,6 +5831,7 @@ impl Window {
         if self.platform_window.start_external_drag(&payload)
             && cx.hand_active_drag_to_platform(self.handle.window_id())
         {
+            self.drag_icon_requested = matches!(payload, crate::ExternalDragPayload::App);
             self.refresh();
         }
     }
