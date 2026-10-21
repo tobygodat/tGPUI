@@ -1329,6 +1329,16 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn start_external_drag(&self, _payload: &ExternalDragPayload) -> bool {
         false
     }
+
+    /// Shows `scene`, `size` device pixels drawn at the origin, under the pointer for the
+    /// platform drag this window started last, with the pointer `hotspot` logical pixels into it.
+    fn set_external_drag_icon(
+        &self,
+        _scene: &Scene,
+        _size: Size<DevicePixels>,
+        _hotspot: Point<Pixels>,
+    ) {
+    }
     fn start_window_resize(&self, _edge: ResizeEdge) {}
     fn set_exclusive_zone(&self, _zone: Pixels) {}
     #[cfg(all(target_os = "linux", feature = "wayland"))]

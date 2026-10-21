@@ -57,6 +57,8 @@ pub(crate) struct TestWindowState {
     scale_factor: f32,
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
+    external_app_drags: usize,
+    external_drag_icons: Vec<(Size<DevicePixels>, Point<Pixels>)>,
     start_external_drag_result: bool,
 }
 
@@ -132,6 +134,8 @@ impl TestWindow {
             scale_factor: 2.0,
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
+            external_app_drags: 0,
+            external_drag_icons: Vec::new(),
             start_external_drag_result: false,
         })))
     }
@@ -298,6 +302,16 @@ impl TestWindow {
 
     pub fn external_drag_files(&self) -> Vec<(PathBuf, bool)> {
         self.0.lock().external_drag_files.clone()
+    }
+
+    /// How many app drags this window handed to the platform.
+    pub fn external_app_drags(&self) -> usize {
+        self.0.lock().external_app_drags
+    }
+
+    /// The size and hotspot of each drag icon this window showed.
+    pub fn external_drag_icons(&self) -> Vec<(Size<DevicePixels>, Point<Pixels>)> {
+        self.0.lock().external_drag_icons.clone()
     }
 
     pub fn set_start_external_drag_result(&self, result: bool) {
@@ -599,8 +613,18 @@ impl PlatformWindow for TestWindow {
             crate::ExternalDragPayload::Files(paths) => {
                 state.external_drag_files.extend_from_slice(paths.entries());
             }
+            crate::ExternalDragPayload::App => state.external_app_drags += 1,
         }
         state.start_external_drag_result
+    }
+
+    fn set_external_drag_icon(
+        &self,
+        _scene: &crate::Scene,
+        size: Size<DevicePixels>,
+        hotspot: Point<Pixels>,
+    ) {
+        self.0.lock().external_drag_icons.push((size, hotspot));
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}

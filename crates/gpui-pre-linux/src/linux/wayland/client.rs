@@ -7,6 +7,7 @@ use std::{
     },
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -419,6 +420,8 @@ pub(crate) struct WaylandClientState {
 struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowStatePtr> {
     data_offer: Option<DataOffer>,
     window: Option<Window>,
+    /// The offer of this app's own drag while it is over the desktop, where no window is.
+    desktop_offer: Option<DataOffer>,
     position: Point<Pixels>,
     uri_read_generation: u64,
 }
@@ -460,6 +463,9 @@ where
 {
     fn handle_leave(&mut self) -> Option<(Window, PlatformInput)> {
         self.invalidate_uri_read();
+        if let Some(desktop_offer) = self.desktop_offer.take() {
+            desktop_offer.destroy();
+        }
         let window = self.window.clone()?;
         let data_offer = self.data_offer.clone()?;
         data_offer.destroy();
@@ -482,6 +488,38 @@ where
                 position: self.position,
             }),
         ))
+    }
+
+    /// This app's own drag entered `window`, or the desktop when `None`. Its offer carries no
+    /// paths to read: the window takes the drag back from the app.
+    fn enter_app_drag(
+        &mut self,
+        data_offer: DataOffer,
+        window: Option<Window>,
+        position: Point<Pixels>,
+    ) -> Option<(Window, PlatformInput)> {
+        self.invalidate_uri_read();
+        self.position = position;
+        let Some(window) = window else {
+            self.desktop_offer = Some(data_offer);
+            return None;
+        };
+        self.data_offer = Some(data_offer);
+        self.window = Some(window.clone());
+        Some((
+            window,
+            PlatformInput::FileDrop(FileDropEvent::AppDragEntered { position }),
+        ))
+    }
+
+    /// Accepts a drop of this app's own drag on the desktop, if it is over the desktop.
+    fn handle_desktop_drop(&mut self) -> bool {
+        let Some(desktop_offer) = self.desktop_offer.take() else {
+            return false;
+        };
+        desktop_offer.finish();
+        desktop_offer.destroy();
+        true
     }
 
     fn complete_uri_read(
@@ -517,6 +555,97 @@ pub(crate) struct ExternalDrag {
     source: wl_data_source::WlDataSource,
     bytes: Vec<u8>,
     window: WaylandWindowStatePtr,
+    /// The private type an app drag is offered as, unique to the drag.
+    app_mime_type: Option<String>,
+    icon: Option<DragIcon>,
+    /// Surfaces below every window that take a drop on the desktop.
+    desktop: Vec<DesktopTarget>,
+}
+
+/// The type every app drag is offered as, followed by an id unique to the drag, so no other
+/// application, nor another instance of this one, takes it for its own.
+pub(crate) const APP_DRAG_MIME_TYPE: &str = "application/x-gpui-app-drag";
+
+static APP_DRAGS_STARTED: AtomicU64 = AtomicU64::new(0);
+
+struct DragIcon {
+    surface: wl_surface::WlSurface,
+    viewport: Option<wp_viewport::WpViewport>,
+    buffer: Option<ShmBuffer>,
+}
+
+/// A transparent layer-shell surface in the background layer of one output, beneath every
+/// window, so a drag released over the desktop lands on this client instead of nowhere.
+struct DesktopTarget {
+    surface: wl_surface::WlSurface,
+    layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+    viewport: wp_viewport::WpViewport,
+    buffer: Option<ShmBuffer>,
+}
+
+/// Marks the layer surfaces of [`DesktopTarget`]s apart from those of windows.
+pub(crate) struct DesktopTargetSurface;
+
+struct ShmBuffer {
+    pool: wl_shm_pool::WlShmPool,
+    buffer: wl_buffer::WlBuffer,
+}
+
+impl ShmBuffer {
+    /// A buffer holding `pixels`, premultiplied ARGB8888 rows of `width` pixels.
+    fn new(globals: &Globals, pixels: &[u8], width: i32, height: i32) -> Option<Self> {
+        let fd = unsafe { libc::memfd_create(c"gpui-drag".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            log::error!("memfd_create failed: {}", std::io::Error::last_os_error());
+            return None;
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        std::io::Write::write_all(&mut file, pixels).log_err()?;
+        let pool = globals.shm.create_pool(
+            std::os::fd::AsFd::as_fd(&file),
+            i32::try_from(pixels.len()).ok()?,
+            &globals.qh,
+            (),
+        );
+        let buffer = pool.create_buffer(
+            0,
+            width,
+            height,
+            width * 4,
+            wl_shm::Format::Argb8888,
+            &globals.qh,
+            (),
+        );
+        Some(Self { pool, buffer })
+    }
+
+    fn destroy(self) {
+        self.buffer.destroy();
+        self.pool.destroy();
+    }
+}
+
+impl ExternalDrag {
+    fn destroy(self) {
+        self.source.destroy();
+        if let Some(icon) = self.icon {
+            icon.surface.destroy();
+            if let Some(viewport) = icon.viewport {
+                viewport.destroy();
+            }
+            if let Some(buffer) = icon.buffer {
+                buffer.destroy();
+            }
+        }
+        for target in self.desktop {
+            target.layer_surface.destroy();
+            target.viewport.destroy();
+            target.surface.destroy();
+            if let Some(buffer) = target.buffer {
+                buffer.destroy();
+            }
+        }
+    }
 }
 
 fn file_uri_list(paths: &FileDragPaths) -> String {
@@ -529,6 +658,41 @@ fn file_uri_list(paths: &FileDragPaths) -> String {
             list.push_str("\r\n");
             list
         })
+}
+
+/// One [`DesktopTarget`] per output, when the compositor offers layer shell and viewports.
+fn desktop_targets<'a>(
+    globals: &Globals,
+    outputs: impl Iterator<Item = &'a wl_output::WlOutput>,
+) -> Vec<DesktopTarget> {
+    let (Some(layer_shell), Some(viewporter)) = (&globals.layer_shell, &globals.viewporter) else {
+        return Vec::new();
+    };
+    outputs
+        .map(|output| {
+            let surface = globals.compositor.create_surface(&globals.qh, ());
+            let layer_surface = layer_shell.get_layer_surface(
+                &surface,
+                Some(output),
+                zwlr_layer_shell_v1::Layer::Background,
+                "gpui-drag-desktop".to_string(),
+                &globals.qh,
+                DesktopTargetSurface,
+            );
+            layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::all());
+            layer_surface.set_exclusive_zone(-1);
+            layer_surface
+                .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+            let viewport = viewporter.get_viewport(&surface, &globals.qh, ());
+            surface.commit();
+            DesktopTarget {
+                surface,
+                layer_surface,
+                viewport,
+                buffer: None,
+            }
+        })
+        .collect()
 }
 
 pub struct ClickState {
@@ -676,25 +840,120 @@ impl WaylandClientStatePtr {
             return false;
         };
 
-        let ExternalDragPayload::Files(paths) = payload;
-        let uri_list = file_uri_list(paths);
-        if uri_list.is_empty() {
-            return false;
-        }
+        let (mime_type, bytes, app_mime_type) = match payload {
+            ExternalDragPayload::Files(paths) => {
+                let uri_list = file_uri_list(paths);
+                if uri_list.is_empty() {
+                    return false;
+                }
+                (FILE_LIST_MIME_TYPE.to_string(), uri_list.into_bytes(), None)
+            }
+            ExternalDragPayload::App => {
+                let id = format!(
+                    "{}-{}",
+                    std::process::id(),
+                    APP_DRAGS_STARTED.fetch_add(1, Ordering::Relaxed)
+                );
+                let mime_type = format!("{APP_DRAG_MIME_TYPE};id={id}");
+                (mime_type.clone(), id.into_bytes(), Some(mime_type))
+            }
+        };
 
+        let globals = &state.globals;
         let serial = state.serial_tracker.get(SerialKind::MousePress);
-        let source =
-            data_device_manager.create_data_source(&state.globals.qh, DataSourceKind::Drag);
-        source.offer(FILE_LIST_MIME_TYPE.to_string());
-        source.set_actions(DndAction::Copy | DndAction::Move);
-        data_device.start_drag(Some(&source), surface, None, serial.as_raw());
+        let source = data_device_manager.create_data_source(&globals.qh, DataSourceKind::Drag);
+        source.offer(mime_type);
+        let icon = app_mime_type.is_some().then(|| DragIcon {
+            surface: globals.compositor.create_surface(&globals.qh, ()),
+            viewport: None,
+            buffer: None,
+        });
+        if app_mime_type.is_some() {
+            source.set_actions(DndAction::Move);
+        } else {
+            source.set_actions(DndAction::Copy | DndAction::Move);
+        }
+        data_device.start_drag(
+            Some(&source),
+            surface,
+            icon.as_ref().map(|icon| &icon.surface),
+            serial.as_raw(),
+        );
+        let desktop = if app_mime_type.is_some() {
+            desktop_targets(globals, state.wl_outputs.values())
+        } else {
+            Vec::new()
+        };
 
         state.external_drag = Some(ExternalDrag {
             source,
-            bytes: uri_list.into_bytes(),
+            bytes,
             window,
+            app_mime_type,
+            icon,
+            desktop,
         });
         true
+    }
+
+    /// Shows `pixels`, premultiplied BGRA rows of `size` device pixels, as the icon of the app
+    /// drag in progress, with the pointer `hotspot` logical pixels into it.
+    pub fn set_drag_icon(
+        &self,
+        pixels: &[u8],
+        size: Size<DevicePixels>,
+        scale: f32,
+        hotspot: Point<Pixels>,
+    ) {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        let state = &mut *state;
+        let Some(icon) = state
+            .external_drag
+            .as_mut()
+            .and_then(|drag| drag.icon.as_mut())
+        else {
+            return;
+        };
+        let Some(buffer) = ShmBuffer::new(&state.globals, pixels, size.width.0, size.height.0)
+        else {
+            return;
+        };
+        let logical = (
+            (size.width.0 as f32 / scale).round() as i32,
+            (size.height.0 as f32 / scale).round() as i32,
+        );
+        match &state.globals.viewporter {
+            Some(viewporter) => {
+                let viewport = icon.viewport.get_or_insert_with(|| {
+                    viewporter.get_viewport(&icon.surface, &state.globals.qh, ())
+                });
+                viewport.set_destination(logical.0.max(1), logical.1.max(1));
+            }
+            None => icon.surface.set_buffer_scale(scale.round().max(1.) as i32),
+        }
+        let offset = (
+            -(f32::from(hotspot.x).round() as i32),
+            -(f32::from(hotspot.y).round() as i32),
+        );
+        let first = icon.buffer.is_none();
+        if icon.surface.version() >= wl_surface::REQ_OFFSET_SINCE {
+            icon.surface.attach(Some(&buffer.buffer), 0, 0);
+            if first {
+                icon.surface.offset(offset.0, offset.1);
+            }
+        } else if first {
+            icon.surface
+                .attach(Some(&buffer.buffer), offset.0, offset.1);
+        } else {
+            icon.surface.attach(Some(&buffer.buffer), 0, 0);
+        }
+        icon.surface
+            .damage_buffer(0, 0, size.width.0, size.height.0);
+        icon.surface.commit();
+        if let Some(previous) = icon.buffer.replace(buffer) {
+            previous.destroy();
+        }
     }
 
     pub fn set_pending_activation(&self, window: ObjectId) {
@@ -1085,6 +1344,7 @@ impl WaylandConnection {
             drag: DragState {
                 data_offer: None,
                 window: None,
+                desktop_offer: None,
                 position: Point::default(),
                 uri_read_generation: 0,
             },
@@ -1889,6 +2149,67 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ObjectId> for WaylandCl
             // Close logic will be handled in drop_window()
             window.close();
         }
+    }
+}
+
+impl WaylandClientState {
+    /// The private type of this client's app drag in progress, if `data_offer` offers it.
+    fn own_app_drag_type(&self, data_offer: &wl_data_offer::WlDataOffer) -> Option<String> {
+        let mime_type = self.external_drag.as_ref()?.app_mime_type.as_ref()?;
+        self.data_offers
+            .iter()
+            .find(|offer| offer.inner == *data_offer)
+            .filter(|offer| offer.has_mime_type(mime_type))
+            .map(|_| mime_type.clone())
+    }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, DesktopTargetSurface>
+    for WaylandClientStatePtr
+{
+    fn event(
+        this: &mut Self,
+        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: <zwlr_layer_surface_v1::ZwlrLayerSurfaceV1 as Proxy>::Event,
+        _: &DesktopTargetSurface,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let zwlr_layer_surface_v1::Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        else {
+            return;
+        };
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let state = &mut *state;
+        layer_surface.ack_configure(serial);
+        let Some(target) = state.external_drag.as_mut().and_then(|drag| {
+            drag.desktop
+                .iter_mut()
+                .find(|target| target.layer_surface == *layer_surface)
+        }) else {
+            return;
+        };
+        let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height)) else {
+            return;
+        };
+        if width == 0 || height == 0 {
+            return;
+        }
+        if target.buffer.is_none() {
+            target.buffer = ShmBuffer::new(&state.globals, &[0; 4], 1, 1);
+        }
+        let Some(buffer) = &target.buffer else {
+            return;
+        };
+        target.viewport.set_destination(width, height);
+        target.surface.attach(Some(&buffer.buffer), 0, 0);
+        target.surface.damage_buffer(0, 0, 1, 1);
+        target.surface.commit();
     }
 }
 
@@ -2899,6 +3220,25 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
             } => {
                 state.serial_tracker.update(SerialKind::DataDevice, serial);
                 if let Some(data_offer) = data_offer {
+                    if let Some(app_mime_type) = state.own_app_drag_type(&data_offer) {
+                        let window = get_window(&mut state, &surface.id());
+                        let over_desktop = state.external_drag.as_ref().is_some_and(|drag| {
+                            drag.desktop.iter().any(|target| target.surface == surface)
+                        });
+                        if window.is_none() && !over_desktop {
+                            data_offer.destroy();
+                            return;
+                        }
+                        data_offer.set_actions(DndAction::Move, DndAction::Move);
+                        data_offer.accept(serial, Some(app_mime_type));
+                        let position = Point::new(x.into(), y.into());
+                        let input = state.drag.enter_app_drag(data_offer, window, position);
+                        drop(state);
+                        if let Some((window, input)) = input {
+                            window.handle_input(input);
+                        }
+                        return;
+                    }
                     let Some(drag_window) = get_window(&mut state, &surface.id()) else {
                         return;
                     };
@@ -2993,6 +3333,17 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 }
             }
             wl_data_device::Event::Drop => {
+                if state.drag.handle_desktop_drop() {
+                    let source_window =
+                        state.external_drag.as_ref().map(|drag| drag.window.clone());
+                    drop(state);
+                    if let Some(source_window) = source_window {
+                        source_window.handle_input(PlatformInput::FileDrop(
+                            FileDropEvent::AppDragDroppedOutside,
+                        ));
+                    }
+                    return;
+                }
                 let input = state.drag.handle_drop();
                 drop(state);
                 if let Some((drag_window, input)) = input {
@@ -3022,7 +3373,12 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
 
         if let wl_data_offer::Event::Offer { mime_type } = event {
             // Drag and drop
-            if mime_type == FILE_LIST_MIME_TYPE {
+            let own_app_drag = state
+                .external_drag
+                .as_ref()
+                .and_then(|drag| drag.app_mime_type.as_deref())
+                == Some(mime_type.as_str());
+            if mime_type == FILE_LIST_MIME_TYPE || own_app_drag {
                 let serial = state.serial_tracker.get(SerialKind::DataDevice);
                 let mime_type = mime_type.clone();
                 data_offer.accept(serial.as_raw(), Some(mime_type));
@@ -3073,11 +3429,15 @@ impl Dispatch<wl_data_source::WlDataSource, DataSourceKind> for WaylandClientSta
                 let Some(external_drag) = state.external_drag.take() else {
                     return;
                 };
-                external_drag.source.destroy();
+                if let Some(desktop_offer) = state.drag.desktop_offer.take() {
+                    desktop_offer.destroy();
+                }
+                let window = external_drag.window.clone();
+                external_drag.destroy();
 
                 let input = PlatformInput::FileDrop(FileDropEvent::Ended);
                 drop(state);
-                external_drag.window.handle_input(input);
+                window.handle_input(input);
             }
             _ => {}
         }
@@ -3276,6 +3636,7 @@ mod tests {
         DragState {
             data_offer: None,
             window: None,
+            desktop_offer: None,
             position: Point::default(),
             uri_read_generation: 0,
         }
@@ -3370,6 +3731,65 @@ mod tests {
         assert!(!data_offer_b.destroyed.get());
         assert_eq!(drag.data_offer.as_ref().map(|offer| offer.name), Some("B"));
         assert_eq!(drag.window, Some("window B"));
+    }
+
+    #[test]
+    fn app_drag_enters_window_without_reading_paths() {
+        let mut drag = drag_state();
+        let data_offer = FakeDataOffer::new("A");
+        let generation = drag.begin_uri_read();
+
+        let input = drag.enter_app_drag(data_offer.clone(), Some("window A"), Point::default());
+        assert!(matches!(
+            input,
+            Some((
+                "window A",
+                PlatformInput::FileDrop(FileDropEvent::AppDragEntered { .. })
+            ))
+        ));
+        assert!(!drag.is_uri_read_current(generation));
+        assert!(!drag.handle_desktop_drop());
+        assert!(matches!(
+            drag.handle_drop(),
+            Some((
+                "window A",
+                PlatformInput::FileDrop(FileDropEvent::Submit { .. })
+            ))
+        ));
+        assert!(data_offer.finished.get());
+        assert!(data_offer.destroyed.get());
+    }
+
+    #[test]
+    fn app_drag_over_desktop_drops_there() {
+        let mut drag = drag_state();
+        let data_offer = FakeDataOffer::new("desktop");
+
+        assert!(
+            drag.enter_app_drag(data_offer.clone(), None, Point::default())
+                .is_none()
+        );
+        assert!(drag.window.is_none());
+        assert!(drag.handle_drop().is_none(), "no window takes the drop");
+        assert!(drag.handle_desktop_drop());
+        assert!(data_offer.finished.get());
+        assert!(data_offer.destroyed.get());
+        assert!(!drag.handle_desktop_drop());
+    }
+
+    #[test]
+    fn leaving_desktop_discards_its_offer() {
+        let mut drag = drag_state();
+        let data_offer = FakeDataOffer::new("desktop");
+
+        drag.enter_app_drag(data_offer.clone(), None, Point::default());
+        assert!(drag.handle_leave().is_none());
+        assert!(data_offer.destroyed.get());
+        assert!(!data_offer.finished.get());
+        assert!(
+            !drag.handle_desktop_drop(),
+            "a drop after leaving is not a desktop drop"
+        );
     }
 
     #[derive(Default)]

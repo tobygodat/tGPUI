@@ -706,6 +706,12 @@ impl ExternalPaths {
 pub enum ExternalDragPayload {
     /// Real on-disk paths, handed to the platform as an outbound file drag.
     Files(FileDragPaths),
+    /// A drag that stays inside this app. The platform carries only an opaque token of a
+    /// private type that other applications do not accept, while the dragged value stays in
+    /// [`App`](crate::App). A window of this app the drag enters takes the value back, so its
+    /// `on_drop` handlers receive it typed. While the platform owns the drag, it shows the
+    /// drag's view under the pointer.
+    App,
 }
 
 /// Paths handed to the platform for a native file drag. Directory metadata is
@@ -756,6 +762,17 @@ pub enum FileDropEvent {
     Exited,
     /// The platform-owned drag session has ended.
     Ended,
+    /// An [`ExternalDragPayload::App`] drag started by this app entered the window. The window
+    /// takes back the dragged value.
+    AppDragEntered {
+        /// The position of the mouse relative to the window.
+        position: Point<Pixels>,
+    },
+    /// An [`ExternalDragPayload::App`] drag was dropped where no window is, such as on the
+    /// desktop. Sent to the window the drag started in, which takes back the dragged value and
+    /// sees the button released outside its bounds, as when a drag that never left it is
+    /// released past its edge.
+    AppDragDroppedOutside,
 }
 
 impl Sealed for FileDropEvent {}

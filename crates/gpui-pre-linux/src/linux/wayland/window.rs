@@ -2099,6 +2099,23 @@ impl PlatformWindow for WaylandWindow {
         state.client.start_external_drag(&state.surface, payload)
     }
 
+    fn set_external_drag_icon(
+        &self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        hotspot: Point<Pixels>,
+    ) {
+        let mut state = self.borrow_mut();
+        let scale = state.scale;
+        let Some(renderer) = state.renderer.as_mut() else {
+            return;
+        };
+        match renderer.render_to_bgra(scene, size) {
+            Ok(pixels) => state.client.set_drag_icon(&pixels, size, scale, hotspot),
+            Err(error) => log::error!("Could not draw the drag icon: {error:#}"),
+        }
+    }
+
     fn start_window_resize(&self, edge: gpui::ResizeEdge) {
         let state = self.borrow();
         if let Some(toplevel) = state.surface_state.toplevel() {

@@ -2238,7 +2238,9 @@ impl PlatformWindow for MacWindow {
     fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
         use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 
-        let ExternalDragPayload::Files(paths) = payload;
+        let ExternalDragPayload::Files(paths) = payload else {
+            return false;
+        };
         if paths.entries().is_empty() {
             log::warn!("start_external_drag declined: no paths");
             return false;

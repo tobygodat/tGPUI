@@ -805,9 +805,10 @@ struct PlatformOwnedDrag {
 
 enum PlatformOwnedDragState {
     Suspended(AnyDrag),
-    // A source-window drop consumes `active_drag` before AppKit ends the dragging session, so this
-    // marker can outlive the active drag and is cleaned up by `FileDropEvent::Ended`.
-    RestoredInSourceWindow,
+    // The window the drag was handed back to. A drop there consumes `active_drag` before the
+    // platform ends the dragging session, so this marker can outlive the active drag and is
+    // cleaned up by `FileDropEvent::Ended`.
+    Restored(WindowId),
 }
 
 /// Contains the state of the full application, and passed as a reference to a variety of callbacks.
@@ -2889,6 +2890,11 @@ impl App {
         self.active_drag.is_some()
     }
 
+    /// The value being dragged, if a drag of a `T` is in progress in a window of this app.
+    pub fn active_drag_value<T: 'static>(&self) -> Option<&T> {
+        self.active_drag.as_ref()?.value.downcast_ref()
+    }
+
     /// Gets the cursor style of the currently active drag operation.
     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)
@@ -2898,9 +2904,9 @@ impl App {
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
         if self.active_drag.is_some() {
             self.active_drag = None;
+            let window_id = window.window_handle().window_id();
             if self.platform_owned_drag.as_ref().is_some_and(|drag| {
-                drag.source_window == window.window_handle().window_id()
-                    && matches!(&drag.state, PlatformOwnedDragState::RestoredInSourceWindow)
+                matches!(&drag.state, PlatformOwnedDragState::Restored(id) if *id == window_id)
             }) {
                 self.platform_owned_drag = None;
             }
@@ -2922,17 +2928,20 @@ impl App {
         true
     }
 
-    pub(crate) fn restore_platform_drag(&mut self, source_window: WindowId) -> bool {
+    /// Hands a platform-owned drag back to `window`. A file drag comes back only to the window
+    /// it started in, where the platform offers its paths again; an app drag comes back to any
+    /// window of this app.
+    pub(crate) fn restore_platform_drag(&mut self, window: WindowId, any_window: bool) -> bool {
         let Some(platform_drag) = self
             .platform_owned_drag
             .as_mut()
-            .filter(|drag| drag.source_window == source_window)
+            .filter(|drag| any_window || drag.source_window == window)
         else {
             return false;
         };
         let state = std::mem::replace(
             &mut platform_drag.state,
-            PlatformOwnedDragState::RestoredInSourceWindow,
+            PlatformOwnedDragState::Restored(window),
         );
         let PlatformOwnedDragState::Suspended(drag) = state else {
             return false;
@@ -2941,11 +2950,25 @@ impl App {
         true
     }
 
-    pub(crate) fn hand_restored_drag_to_platform(&mut self, source_window: WindowId) -> bool {
-        let Some(platform_drag) = self.platform_owned_drag.as_mut().filter(|drag| {
-            drag.source_window == source_window
-                && matches!(&drag.state, PlatformOwnedDragState::RestoredInSourceWindow)
-        }) else {
+    /// The view and cursor offset of the drag `source_window` handed to the platform.
+    pub(crate) fn platform_drag_view(
+        &self,
+        source_window: WindowId,
+    ) -> Option<(AnyView, Point<Pixels>)> {
+        let drag = self
+            .platform_owned_drag
+            .as_ref()
+            .filter(|drag| drag.source_window == source_window)?;
+        let PlatformOwnedDragState::Suspended(drag) = &drag.state else {
+            return None;
+        };
+        Some((drag.view.clone(), drag.cursor_offset))
+    }
+
+    pub(crate) fn hand_restored_drag_to_platform(&mut self, window: WindowId) -> bool {
+        let Some(platform_drag) = self.platform_owned_drag.as_mut().filter(
+            |drag| matches!(&drag.state, PlatformOwnedDragState::Restored(id) if *id == window),
+        ) else {
             return false;
         };
         let Some(drag) = self.active_drag.take() else {

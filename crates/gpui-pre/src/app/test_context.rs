@@ -1,12 +1,13 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
-    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DisplayId, DrawPhase,
-    Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent,
-    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
-    SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
-    WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
+    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DevicePixels, DisplayId,
+    DrawPhase, Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global,
+    InputEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result,
+    SharedString, Size, SystemNotification, SystemNotificationResponse, Task, TestDispatcher,
+    TestPlatform, TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window,
+    WindowBounds, WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode,
+    window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -644,6 +645,25 @@ impl TestAppContext {
             window.dispatch_keystroke(keystroke, cx)
         })
         .unwrap();
+    }
+
+    /// Sets whether the platform accepts the drags `window` hands it when they leave it.
+    pub fn set_start_external_drag_result(&self, window: AnyWindowHandle, result: bool) {
+        self.test_window(window)
+            .set_start_external_drag_result(result);
+    }
+
+    /// How many app drags `window` handed to the platform.
+    pub fn external_app_drags(&self, window: AnyWindowHandle) -> usize {
+        self.test_window(window).external_app_drags()
+    }
+
+    /// The size and hotspot of each drag icon `window` asked the platform to show.
+    pub fn external_drag_icons(
+        &self,
+        window: AnyWindowHandle,
+    ) -> Vec<(Size<DevicePixels>, Point<Pixels>)> {
+        self.test_window(window).external_drag_icons()
     }
 
     /// Returns the `TestWindow` backing the given handle.
