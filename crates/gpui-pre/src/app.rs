@@ -2950,7 +2950,8 @@ impl App {
         true
     }
 
-    /// The view and cursor offset of the drag `source_window` handed to the platform.
+    /// The view and cursor offset of the drag `source_window` handed to the platform, also
+    /// while a window has taken it back.
     pub(crate) fn platform_drag_view(
         &self,
         source_window: WindowId,
@@ -2959,8 +2960,9 @@ impl App {
             .platform_owned_drag
             .as_ref()
             .filter(|drag| drag.source_window == source_window)?;
-        let PlatformOwnedDragState::Suspended(drag) = &drag.state else {
-            return None;
+        let drag = match &drag.state {
+            PlatformOwnedDragState::Suspended(drag) => drag,
+            PlatformOwnedDragState::Restored(_) => self.active_drag.as_ref()?,
         };
         Some((drag.view.clone(), drag.cursor_offset))
     }

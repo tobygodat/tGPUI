@@ -885,6 +885,9 @@ impl WaylandClientStatePtr {
             Vec::new()
         };
 
+        if let Some(previous) = state.external_drag.take() {
+            previous.destroy();
+        }
         state.external_drag = Some(ExternalDrag {
             source,
             bytes,
@@ -897,7 +900,9 @@ impl WaylandClientStatePtr {
     }
 
     /// Shows `pixels`, premultiplied BGRA rows of `size` device pixels, as the icon of the app
-    /// drag in progress, with the pointer `hotspot` logical pixels into it.
+    /// drag in progress, with the pointer `hotspot` logical pixels into it. Without viewporter
+    /// the icon shows one buffer pixel per surface unit, as a buffer scale would need the
+    /// size to divide by it.
     pub fn set_drag_icon(
         &self,
         pixels: &[u8],
@@ -919,22 +924,23 @@ impl WaylandClientStatePtr {
         else {
             return;
         };
-        let logical = (
-            (size.width.0 as f32 / scale).round() as i32,
-            (size.height.0 as f32 / scale).round() as i32,
-        );
-        match &state.globals.viewporter {
+        let surface_scale = match &state.globals.viewporter {
             Some(viewporter) => {
+                let logical = (
+                    (size.width.0 as f32 / scale).round() as i32,
+                    (size.height.0 as f32 / scale).round() as i32,
+                );
                 let viewport = icon.viewport.get_or_insert_with(|| {
                     viewporter.get_viewport(&icon.surface, &state.globals.qh, ())
                 });
                 viewport.set_destination(logical.0.max(1), logical.1.max(1));
+                1.
             }
-            None => icon.surface.set_buffer_scale(scale.round().max(1.) as i32),
-        }
+            None => scale,
+        };
         let offset = (
-            -(f32::from(hotspot.x).round() as i32),
-            -(f32::from(hotspot.y).round() as i32),
+            -((f32::from(hotspot.x) * surface_scale).round() as i32),
+            -((f32::from(hotspot.y) * surface_scale).round() as i32),
         );
         let first = icon.buffer.is_none();
         if icon.surface.version() >= wl_surface::REQ_OFFSET_SINCE {

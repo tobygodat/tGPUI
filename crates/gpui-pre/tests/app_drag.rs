@@ -2,9 +2,9 @@
 //! app, comes back to whichever window of the app it enters, and shows its view as the drag icon.
 
 use gpui::{
-    AnyWindowHandle, AppContext as _, Context, DevicePixels, ExternalDragPayload, ExternalPaths,
-    FileDropEvent, InputEvent as _, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Render, StatefulInteractiveElement as _, Styled,
+    AnyWindowHandle, App, AppContext as _, Context, DevicePixels, ExternalDragPayload,
+    ExternalPaths, FileDropEvent, InputEvent as _, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Render, StatefulInteractiveElement as _, Styled,
     TestAppContext, Window, div, point, px, size,
 };
 use std::{
@@ -59,6 +59,15 @@ impl Render for Target {
 /// Opens a source window, starts dragging `value` and moves the pointer out of the window, so
 /// the platform takes the drag.
 fn drag_out(cx: &mut TestAppContext, value: u32) -> (AnyWindowHandle, Rc<Cell<u32>>) {
+    drag_out_then(cx, value, |_| {})
+}
+
+/// [`drag_out`], running `then` before the source draws again.
+fn drag_out_then(
+    cx: &mut TestAppContext,
+    value: u32,
+    then: impl FnOnce(&mut App),
+) -> (AnyWindowHandle, Rc<Cell<u32>>) {
     let released_outside = Rc::new(Cell::new(0));
     let source: AnyWindowHandle = cx
         .add_window({
@@ -95,10 +104,36 @@ fn drag_out(cx: &mut TestAppContext, value: u32) -> (AnyWindowHandle, Rc<Cell<u3
             );
         }
         assert!(!cx.has_active_drag(), "the platform owns the drag");
+        then(cx);
         window.draw(cx).clear(cx);
     })
     .unwrap();
     (source, released_outside)
+}
+
+#[gpui::test]
+fn the_drag_icon_shows_when_another_window_takes_the_drag_before_the_source_draws(
+    cx: &mut TestAppContext,
+) {
+    let destination: AnyWindowHandle = cx
+        .add_window(|_, _| Target(Rc::new(RefCell::new(Vec::new()))))
+        .into();
+    cx.update_window(destination, |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let (source, _) = drag_out_then(cx, 5, |cx| {
+        cx.update_window(destination, |_, window, cx| {
+            window.dispatch_event(
+                FileDropEvent::AppDragEntered {
+                    position: point(px(30.), px(30.)),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.has_active_drag(), "the destination took the drag");
+        })
+        .unwrap();
+    });
+    assert_eq!(cx.external_drag_icons(source).len(), 1);
 }
 
 #[gpui::test]
