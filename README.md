@@ -17,11 +17,9 @@ carries, so `git log` lists the patches and `git diff <import commit>` shows the
 - `gpui-pre-linux`: Wayland key and modifiers events that arrive before a keymap are dropped
   instead of panicking. Keystone KS-009, upstream zed-industries/zed#64660.
 - `gpui-pre-linux`: Wayland displays report the logical position and size that xdg-output
-  gives, so they are right under fractional scale and rotation and sit where the compositor puts
-  them. With xdg-output an output is published only once its logical area arrives, and a window
-  that entered it earlier is told then. Without xdg-output displays are the current mode divided
-  by the integer `wl_output` scale, as upstream. A resize of a normal window also sets the size
-  it returns to after unmaximize. Keystone TOB-182.
+  gives, so they are right under fractional scale and rotation. Without xdg-output they are the
+  mode divided by the integer `wl_output` scale, as upstream. A resize of a normal window also
+  sets the size it returns to after unmaximize. Keystone TOB-182.
 - `taffy`: measurements evicted from the nine per-node cache slots are kept in an overflow list.
   Without it, nested flex layout re-measures subtrees on every pass and grows about fourfold per
   nesting level. An evicted measurement answers only a request with identical inputs.

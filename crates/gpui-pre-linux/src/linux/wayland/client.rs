@@ -3711,6 +3711,11 @@ mod tests {
             rotated_at_one_and_a_half,
             "a later change shows only once committed"
         );
+        output.commit_logical();
+        assert_eq!(
+            output.complete(true).expect("complete").pixel_bounds(2.),
+            Bounds::new(point(px(1920.), px(0.)), size(px(1280.), px(720.)))
+        );
     }
 
     #[test]
