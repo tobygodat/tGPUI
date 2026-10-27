@@ -1749,7 +1749,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn resize(&mut self, size: Size<Pixels>) {
-        let state = self.borrow();
+        let mut state = self.borrow_mut();
         let state_ptr = self.0.clone();
 
         // A popup's placement is the compositor's, so a resize re-runs the positioner and the
@@ -1789,6 +1789,12 @@ impl PlatformWindow for WaylandWindow {
             window_geometry.size.width,
             window_geometry.size.height,
         );
+        if !state.maximized && !state.fullscreen {
+            state.window_bounds = Bounds {
+                origin: Point::default(),
+                size,
+            };
+        }
 
         state
             .globals

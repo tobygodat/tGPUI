@@ -327,22 +327,33 @@ pub struct InProgressOutput {
     size: Option<Size<DevicePixels>>,
     logical_position: Option<Point<Pixels>>,
     logical_size: Option<Size<Pixels>>,
+    logical_bounds: Option<Bounds<Pixels>>,
     subpixel: Option<wl_output::Subpixel>,
     refresh_interval: Option<Duration>,
 }
 
 impl InProgressOutput {
-    fn complete(&self) -> Option<Output> {
+    /// Applies the logical position and size received since the last xdg-output commit.
+    fn commit_logical(&mut self) {
+        if let Some((position, size)) = self.logical_position.zip(self.logical_size) {
+            self.logical_bounds = Some(Bounds::new(position, size));
+        }
+    }
+
+    /// The output as described so far, once it is complete. `needs_logical` holds it back
+    /// until xdg-output has given its logical area, so it is never published at the
+    /// integer-scale size first.
+    fn complete(&self, needs_logical: bool) -> Option<Output> {
+        if needs_logical && self.logical_bounds.is_none() {
+            return None;
+        }
         if let Some((position, size)) = self.position.zip(self.size) {
             let scale = self.scale.unwrap_or(1);
             Some(Output {
                 name: self.name.clone(),
                 scale,
                 bounds: Bounds::new(position, size),
-                logical_bounds: self
-                    .logical_position
-                    .zip(self.logical_size)
-                    .map(|(position, size)| Bounds::new(position, size)),
+                logical_bounds: self.logical_bounds,
                 subpixel: self.subpixel,
                 refresh_interval: self.refresh_interval,
             })
@@ -788,10 +799,11 @@ impl WaylandClientStatePtr {
     fn complete_output(&self, id: &ObjectId) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
+        let needs_logical = state.xdg_outputs.contains_key(id);
         let Some(complete) = state
             .in_progress_outputs
             .get(id)
-            .and_then(InProgressOutput::complete)
+            .and_then(|output| output.complete(needs_logical))
         else {
             return;
         };
@@ -2125,8 +2137,17 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
                 }
             }
             wl_output::Event::Done => {
+                let id = output.id();
+                if state
+                    .xdg_outputs
+                    .get(&id)
+                    .is_some_and(|xdg_output| xdg_output.version() >= 3)
+                    && let Some(in_progress_output) = state.in_progress_outputs.get_mut(&id)
+                {
+                    in_progress_output.commit_logical();
+                }
                 drop(state);
-                this.complete_output(&output.id());
+                this.complete_output(&id);
             }
             _ => {}
         }
@@ -2165,6 +2186,7 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ObjectId> for WaylandClientStatePtr 
             }
             // From version 3 the compositor sends `wl_output.done` instead.
             zxdg_output_v1::Event::Done => {
+                in_progress_output.commit_logical();
                 drop(state);
                 this.complete_output(output_id);
             }
@@ -3651,26 +3673,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_bounds_are_logical_where_xdg_output_reports_them() {
-        let mut output = Output {
-            name: None,
-            scale: 2,
-            bounds: Bounds::new(
-                point(DevicePixels(0), DevicePixels(0)),
-                size(DevicePixels(1920), DevicePixels(1080)),
-            ),
-            logical_bounds: None,
-            subpixel: None,
-            refresh_interval: None,
+    fn an_output_shows_its_logical_area_once_xdg_output_commits_it() {
+        let mut output = InProgressOutput {
+            scale: Some(2),
+            position: Some(point(DevicePixels(0), DevicePixels(0))),
+            size: Some(size(DevicePixels(1920), DevicePixels(1080))),
+            ..InProgressOutput::default()
         };
+        let mode_over_scale = Bounds::new(point(px(0.), px(0.)), size(px(960.), px(540.)));
+        let without_xdg_output = output.complete(false).expect("complete");
+        assert_eq!(without_xdg_output.pixel_bounds(2.), mode_over_scale);
+
+        output.logical_position = Some(point(px(1920.), px(0.)));
         assert_eq!(
-            output.pixel_bounds(2.),
-            Bounds::new(point(px(0.), px(0.)), size(px(960.), px(540.)))
+            output.complete(true),
+            None,
+            "not published before its logical area"
         );
+        output.logical_size = Some(size(px(720.), px(1280.)));
+        assert_eq!(
+            output.complete(true),
+            None,
+            "not published before the commit"
+        );
+        output.commit_logical();
         let rotated_at_one_and_a_half =
             Bounds::new(point(px(1920.), px(0.)), size(px(720.), px(1280.)));
-        output.logical_bounds = Some(rotated_at_one_and_a_half);
-        assert_eq!(output.pixel_bounds(2.), rotated_at_one_and_a_half);
+        assert_eq!(
+            output.complete(true).expect("complete").pixel_bounds(2.),
+            rotated_at_one_and_a_half
+        );
+
+        output.logical_size = Some(size(px(1280.), px(720.)));
+        assert_eq!(
+            output.complete(true).expect("complete").pixel_bounds(2.),
+            rotated_at_one_and_a_half,
+            "a later change shows only once committed"
+        );
     }
 
     #[test]
