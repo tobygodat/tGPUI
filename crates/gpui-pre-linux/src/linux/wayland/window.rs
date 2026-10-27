@@ -8,7 +8,7 @@ use std::{
 };
 
 use calloop::ping::Ping;
-use collections::{FxHashMap, HashMap};
+use collections::{FxHashMap, HashMap, HashSet};
 use futures::channel::oneshot::Receiver;
 
 use raw_window_handle as rwh;
@@ -111,6 +111,8 @@ pub struct WaylandWindowState {
     blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
     viewport: Option<wp_viewport::WpViewport>,
     outputs: HashMap<ObjectId, Output>,
+    /// Outputs the surface entered before their description was complete.
+    entered_unpublished: HashSet<ObjectId>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
     /// Taken when the window is dropped. Its GPU objects use the Wayland connection, so they
@@ -614,6 +616,7 @@ impl WaylandWindowState {
             viewport,
             globals,
             outputs: HashMap::default(),
+            entered_unpublished: HashSet::default(),
             display: None,
             renderer: Some(renderer),
             bounds: options.bounds,
@@ -1394,6 +1397,28 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    /// Updates the display and scale after the surface entered an output.
+    fn output_entered(&self) {
+        let mut state = self.state.borrow_mut();
+        let previous_display = state.display.as_ref().map(|(id, _)| id.clone());
+        let scale = state.primary_output_scale();
+        let display_changed = state.display.as_ref().map(|(id, _)| id) != previous_display.as_ref();
+        state.update_subpixel_layout();
+
+        // We use `PreferredBufferScale` instead to set the scale if it's available
+        if state.surface.version() < wl_surface::EVT_PREFERRED_BUFFER_SCALE_SINCE {
+            state.surface.set_buffer_scale(scale);
+            drop(state);
+            self.rescale(scale as f32);
+        } else {
+            drop(state);
+        }
+        if display_changed {
+            self.report_display_changed();
+        }
+        self.request_redraw();
+    }
+
     #[allow(clippy::mutable_key_type)]
     pub fn handle_surface_event(
         &self,
@@ -1405,33 +1430,16 @@ impl WaylandWindowStatePtr {
         match event {
             wl_surface::Event::Enter { output } => {
                 let id = output.id();
-
                 let Some(output) = outputs.get(&id) else {
+                    state.entered_unpublished.insert(id);
                     return;
                 };
-
                 state.outputs.insert(id, output.clone());
-
-                let previous_display = state.display.as_ref().map(|(id, _)| id.clone());
-                let scale = state.primary_output_scale();
-                let display_changed =
-                    state.display.as_ref().map(|(id, _)| id) != previous_display.as_ref();
-                state.update_subpixel_layout();
-
-                // We use `PreferredBufferScale` instead to set the scale if it's available
-                if state.surface.version() < wl_surface::EVT_PREFERRED_BUFFER_SCALE_SINCE {
-                    state.surface.set_buffer_scale(scale);
-                    drop(state);
-                    self.rescale(scale as f32);
-                } else {
-                    drop(state);
-                }
-                if display_changed {
-                    self.report_display_changed();
-                }
-                self.request_redraw();
+                drop(state);
+                self.output_entered();
             }
             wl_surface::Event::Leave { output } => {
+                state.entered_unpublished.remove(&output.id());
                 state.outputs.remove(&output.id());
 
                 let previous_display = state.display.as_ref().map(|(id, _)| id.clone());
@@ -1630,6 +1638,12 @@ impl WaylandWindowStatePtr {
     /// changes the output's properties, such as its mode.
     pub fn handle_output_changed(&self, id: &ObjectId, output: &Output) {
         let mut state = self.state.borrow_mut();
+        if state.entered_unpublished.remove(id) {
+            state.outputs.insert(id.clone(), output.clone());
+            drop(state);
+            self.output_entered();
+            return;
+        }
         let Some(entered) = state.outputs.get_mut(id) else {
             return;
         };

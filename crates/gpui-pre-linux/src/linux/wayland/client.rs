@@ -1360,6 +1360,7 @@ impl WaylandConnection {
             frame_ping,
         )
         .context("failed to bind required Wayland globals")?;
+        #[allow(clippy::mutable_key_type)]
         let xdg_outputs = wl_outputs
             .iter()
             .filter_map(|(id, output)| Some((id.clone(), xdg_output(&globals, output)?)))
